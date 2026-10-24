@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8"><title>競馬研究所 Ver.2</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--card:#f3f4f6;--ac:#0b6b3a;--mut:#666;--er:#b00020;--wn:#9a6700;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#111;--fg:#eee;--card:#222;--ac:#4cc38a;--mut:#aaa;--er:#ff6b81;--wn:#e3b341}}
+:root[data-theme="dark"]{--bg:#111;--fg:#eee;--card:#222;--ac:#4cc38a;--mut:#aaa;--er:#ff6b81;--wn:#e3b341}
+body{margin:0;padding:12px;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,"Hiragino Sans",sans-serif}
+h1{font-size:18px;margin:4px 0 8px}h2{font-size:16px;margin:0 0 6px}
+.c{background:var(--card);border-radius:10px;padding:12px;margin:10px 0}
+button,label.b{display:block;width:100%;padding:14px;margin:8px 0;border:0;border-radius:10px;background:var(--ac);color:#fff;font-size:16px;text-align:center;box-sizing:border-box}
+button.s{background:var(--card);color:var(--fg);border:1px solid var(--mut)}
+input[type=file]{display:none}.m{color:var(--mut);font-size:13px}.e{color:var(--er)}.w{color:var(--wn)}
+.sc{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:5px 4px;border-bottom:1px solid var(--mut);text-align:right;white-space:nowrap}td:nth-child(2),th:nth-child(2){text-align:left}
+tr.h{cursor:pointer}pre{white-space:pre-wrap;font-size:12px;max-height:240px;overflow:auto}
+</style></head><body>
+<h1>競馬研究所 Ver.2｜簡易予想</h1>
+<div id="v1">
+<div class="c"><label class="b" for="f">PDFを選択（複数可）</label><input id="f" type="file" accept="application/pdf" multiple>
+<div id="fl" class="m">未選択</div>
+<button id="go">解析・予想開始</button>
+<div id="pg" class="m"></div><div id="er" class="e"></div></div>
+<div class="m">PDF内の情報のみ使用。オッズ・人気・予想印は不使用。読み取れない項目は「未取得」とし、推測で補完しません。処理はすべてブラウザ内で完結します。</div>
+</div>
+<div id="v2" hidden>
+<div style="display:flex;gap:8px"><button class="s" id="csv">CSV出力</button><button class="s" id="json">JSON出力</button></div>
+<button class="s" id="back">← 別のPDFを解析</button>
+<div id="res"></div>
+</div>
+<div id="v3" hidden><button class="s" id="b3">← 結果へ戻る</button><div id="det"></div></div>
+<script>
+const $=id=>document.getElementById(id);
+try{pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"}catch(e){}
+let files=[],out=[],created="";
+$("f").onchange=e=>{files=[...e.target.files];$("fl").textContent=files.length?files.map(x=>x.name).join(" / "):"未選択"};
+const clamp=(x,a,b)=>Math.min(b,Math.max(a,x));
+const ms=m=>clamp(100-50*m,0,100); // 0秒=100,1秒=50,2秒以上=0（直線補間）
+const f1=x=>x==null?"未取得":x.toFixed(1);
+
+/* ---- PDF items (JRA出馬表の列位置で解析) ---- */
+async function pdfItems(file){
+  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer(),cMapUrl:"https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/",cMapPacked:true}).promise;const it=[];
+  for(let p=1;p<=pdf.numPages;p++){const tc=await(await pdf.getPage(p)).getTextContent();
+    for(const i of tc.items){const s=i.str.trim();if(s)it.push({s,x:i.transform[4],w:i.width||0,Y:-(p-1)*10000+i.transform[5]})}}
+  return it;
+}
+function rowsOf(a){const r=[];[...a].sort((p,q)=>q.Y-p.Y||p.x-q.x).forEach(i=>{const l=r[r.length-1];if(l&&Math.abs(l.Y-i.Y)<=2.5)l.t.push(i);else r.push({Y:i.Y,t:[i]})});
+  return r.map(l=>l.t.sort((p,q)=>p.x-q.x).map(i=>i.s).join(" "))}
+function cell(a){
+  const t=rowsOf(a).join(" ");const m=t.match(/(\d{3,4})\s*(芝|ダ|障)/),d=t.match(/(\d{4}年\d{1,2}月\d{1,2}日)/),g=t.match(/\((-?\d{1,2}\.\d)\)/);
+  let rk=(t.match(/(\d{1,2})\s*着/)||[])[1];
+  if(rk==null){const k=a.find(i=>i.s=="着");if(k){const c=a.filter(i=>/^\d{1,2}$/.test(i.s)&&i.x<=k.x+1&&Math.abs(i.Y-k.Y)<8).sort((p,q)=>q.x-p.x)[0];if(c)rk=c.s}}
+  if(!m||rk==null)return null;
+  return{date:d?d[1]:"未取得",type:m[2],dist:+m[1],rank:+rk,margin:g?+g[1]:null}
+}
+function parse(items,name){
+  if(items.length<30)throw new Error("文字を読み取れません（日本語フォント未埋め込み・画像PDFの可能性）");
+  let c=items.filter(i=>/^(前走|前々走|[3-5]?走前)$/.test(i.s.normalize("NFKC").replace(/\s/g,""))).sort((p,q)=>p.x-q.x).map(h=>h.x+h.w/2);
+  if(c.length<4){const e=[];items.filter(i=>/^\d{4}年\d{1,2}月\d{1,2}日/.test(i.s)&&i.x>280).sort((p,q)=>p.x-q.x).forEach(i=>{if(!e.length||i.x-e[e.length-1]>20)e.push(i.x)});c=e.map(v=>v+35)}
+  if(c.length<4)throw new Error(`出馬表の列位置を特定できません（読取${items.length}件／見出し${c.length}列）。先頭の文字：`+items.slice(0,30).map(i=>i.s).join("|").slice(0,200));
+  c=c.slice(0,4);c.push(c[3]+(c[3]-c[2]));
+  const b=[c[0]-(c[1]-c[0])/2,...c.slice(1).map((v,k)=>(c[k]+v)/2),c[4]+(c[4]-c[3])/2];
+  const txt=rowsOf(items.filter(i=>i.Y>-5000)).join("\n"),g=re=>(txt.match(re)||[])[1];
+  const ty=txt.match(/コース[:：]\s*([\d,]+)\s*メートル\s*（\s*(ダート|芝|障)/);
+  const race={file:name,date:g(/(\d{4}年\d{1,2}月\d{1,2}日)\s*（[日月火水木金土]曜）/)||"未取得",course:g(/回\s*(東京|京都|中山|阪神|新潟|福島|小倉|札幌|函館|中京)\s*\d+日/)||"未取得",
+    no:g(/(\d{1,2})\s*レース/)||"未取得",title:(items.map(i=>i.s).find(s=>/^\d歳(以上)?\s*(新馬|未勝利|\d勝クラス|オープン)/.test(s))||items.map(i=>i.s).find(s=>s.length<30&&/(ステークス|賞|特別|カップ)$/.test(s)&&!/登録馬/.test(s))||"未取得"),
+    type:ty?(ty[2]=="芝"?"芝":ty[2]=="障"?"障":"ダ"):null,dist:ty?+ty[1].replace(",",""):null,going:"未取得"};
+  race.shinba=/新馬/.test(race.title);
+  const recs=items.filter(i=>/\(\d+\.\d+\.\d+\.\d+\)/.test(i.s)&&i.x<b[0]-5).sort((p,q)=>q.Y-p.Y);
+  if(!recs.length)throw new Error("出走馬を抽出できません");
+  const names=recs.map(r=>{const n=items.filter(i=>i!==r&&Math.abs(i.x-r.x)<6&&i.Y>r.Y&&i.Y-r.Y<25&&!/^[\d(（]/.test(i.s)).sort((p,q)=>p.Y-q.Y)[0];return{s:n?n.s:"(馬名未取得)",Y:n?n.Y:r.Y+8,x:n?n.x:r.x}});
+  const nx=Math.min(...names.map(n=>n.x));
+  const horses=names.map((n,i)=>{const top=n.Y+10,bot=i+1<names.length?names[i+1].Y+10:-1e9,inb=t=>t.Y<=top&&t.Y>bot;
+    const dg=items.filter(t=>inb(t)&&/^\d{1,2}$/.test(t.s)&&t.x<nx-3&&t.x>nx-60).sort((p,q)=>q.x-p.x);
+    if(!dg.length)throw new Error(`馬番を特定できません（${i+1}頭目 ${n.s}／記録${recs.length}）`);
+    const blk=items.filter(t=>inb(t)&&t.x+t.w/2>=b[0]),runs=[];
+    if(i==0)race.dbg='列境界:'+b.map(Math.round).join(',')+'／1頭目の成績欄:'+blk.sort((p,q)=>q.Y-p.Y||p.x-q.x).slice(0,45).map(t=>Math.round(t.x)+':'+t.s).join(' ');
+    for(let k=0;k<5;k++){const r=cell(blk.filter(t=>{const cx=t.x+t.w/2;return cx>=b[k]&&cx<b[k+1]}));if(r)runs.push(r)}
+    return{no:+dg[0].s,name:n.s,runs}});
+  const nn=horses.map(h=>h.no);if(new Set(nn).size!=nn.length)throw new Error("馬番が重複しています（馬の区切りを誤認の可能性）："+nn.join(","));
+  return{race,horses,raw:txt};
+}
+/* ---- Ver.2 model ---- */
+function score(h,race){
+  const rr=h.runs.filter(r=>r.margin!=null),sc=rr.map(r=>ms(r.margin));const n=sc.length;const note=[];if(rr.length<h.runs.length)note.push("着差未取得の走は除外");
+  let A=null,B=null,C=null;
+  if(n){const w=[5,4,3,2,1].slice(0,n);A=sc.reduce((a,s,i)=>a+s*w[i],0)/w.reduce((a,b)=>a+b,0)}
+  if(n){const t=sc.slice(0,3);B=t.length==1?50:clamp(50+(t[0]-t[t.length-1])/2,0,100)}
+  const mt=rr.filter(r=>r.type===race.type&&race.dist&&Math.abs(r.dist-race.dist)<=200).map(r=>ms(r.margin));
+  let cT=false;if(mt.length)C=mt.reduce((a,b)=>a+b)/mt.length;else{C=50;cT=true;note.push("適性未検証")}
+  let T=null;if(A!=null){T=A*.6+B*.2+C*.2}else note.push("過去走なし：評価不可");
+  return{A,B,C,T,note,sc,matched:mt.length,B_prov:false};
+}
+function run(){
+  const R=[];
+  for(const p of out){if(p.err)continue;p.race.sh=p.race.shinba;
+    p.rows=p.horses.map(h=>({h,s:score(h,p.race)}));
+    if(p.race.shinba){p.rank=[];continue}
+    const ok=p.rows.filter(x=>x.s.T!=null).sort((a,b)=>b.s.T-a.s.T||b.s.A-a.s.A||b.s.C-a.s.C||a.h.no-b.h.no);
+    p.rank=ok;}
+}
+/* ---- UI ---- */
+$("go").onclick=async()=>{
+  if(!files.length){$("er").textContent="PDFを選択してください";return}
+  $("er").innerHTML="";out=[];created=new Date().toISOString();
+  for(let i=0;i<files.length;i++){$("pg").textContent=`解析中 ${i+1}/${files.length}：${files[i].name}`;
+    try{const L=await pdfItems(files[i]);const r=parse(L,files[i].name);if(!r.horses.length)throw new Error("出走馬を抽出できません");out.push(r)}
+    catch(e){out.push({err:e.message,race:{file:files[i].name}});$("er").innerHTML+=`<div>${files[i].name}：${e.message}</div>`}
+    await new Promise(r=>setTimeout(r))}
+  $("pg").textContent="完了";run();show();
+};
+function show(){
+  $("v1").hidden=true;$("v2").hidden=false;$("v3").hidden=true;let h="";
+  out.forEach((p,pi)=>{
+    if(p.err){h+=`<div class="c"><h2>${p.race.file}</h2><div class="e">解析失敗：${p.err}</div></div>`;return}
+    const r=p.race;h+=`<div class="c"><h2>${r.date} ${r.course} ${r.no}R ${r.title}</h2><div class="m">${r.type||"未取得"}${r.dist||"未取得"}m／馬場：${r.going}／出走${p.horses.length}頭</div>`;
+    if(p.rows.every(x=>!x.h.runs.length))h+=`<p class="e">過去走を1走も取得できませんでした。診断：</p><pre>${(r.dbg||"").replace(/</g,"&lt;")}</pre>`;
+    if(r.shinba){h+=`<p class="w">新馬戦：過去走データがないためA・B・C数値モデルの対象外（予想順位なし）</p></div>`;return}
+    const k=p.rank;
+    if(k.length<2)h+=`<p class="w"><b>予想保留</b>（評価可能な馬が2頭未満）</p>`;
+    else h+=`<p>能力1位：<b>${k[0].h.no} ${k[0].h.name}</b>（${f1(k[0].s.T)}）<br>能力2位：<b>${k[1].h.no} ${k[1].h.name}</b>（${f1(k[1].s.T)}）<br>馬連候補：<b>${Math.min(k[0].h.no,k[1].h.no)}-${Math.max(k[0].h.no,k[1].h.no)}</b></p>`;
+    h+=`<div class="sc"><table><tr><th>順</th><th>馬</th><th>A</th><th>B</th><th>C</th><th>総合</th></tr>`;
+    const ng=p.rows.filter(x=>x.s.T==null);
+    [...k,...ng].forEach((x,i)=>{h+=`<tr class="h" onclick="det(${pi},${x.h.no})"><td>${x.s.T!=null?i+1:"–"}</td><td>${x.h.no} ${x.h.name}${x.s.note.length?` <span class="w">※</span>`:""}</td><td>${f1(x.s.A)}</td><td>${f1(x.s.B)}</td><td>${f1(x.s.C)}</td><td><b>${f1(x.s.T)}</b></td></tr>`});
+    h+=`</table></div><div class="m">行をタップで詳細。※＝データ不足・暫定</div></div>`});
+  $("res").innerHTML=h;
+}
+window.det=(pi,no)=>{const p=out[pi],x=p.rows.find(x=>x.h.no==no),r=p.race;$("v2").hidden=true;$("v3").hidden=false;
+  let h=`<div class="c"><h2>${no} ${x.h.name}</h2><div class="m">今回：${r.type||"未取得"}${r.dist||"未取得"}m</div>`;
+  if(!x.h.runs.length)h+=`<p class="e">過去走を取得できませんでした（未取得）</p>`;
+  else{h+=`<div class="sc"><table><tr><th>#</th><th>日付</th><th>条件</th><th>着順</th><th>着差</th><th>点</th><th>適性</th></tr>`;
+    x.h.runs.forEach((q,i)=>{const m=q.type===r.type&&r.dist&&Math.abs(q.dist-r.dist)<=200;h+=`<tr><td>${i+1}</td><td>${q.date}</td><td>${q.type}${q.dist}</td><td>${q.rank}</td><td>${q.margin==null?"未取得":q.margin}</td><td>${q.margin==null?"–":ms(q.margin).toFixed(1)}</td><td>${m?"○":"–"}</td></tr>`});h+=`</table></div>`}
+  const s=x.s;h+=`<p>A（重み${[5,4,3,2,1].slice(0,x.s.sc.length).join("・")}）＝${f1(s.A)}<br>B（直近${Math.min(3,x.s.sc.length)}走）＝${f1(s.B)}<br>C（一致${s.matched}走）＝${f1(s.C)}<br>総合＝A×0.6＋B×0.2＋C×0.2＝<b>${f1(s.T)}</b></p>${s.note.map(n=>`<div class="w">※${n}</div>`).join("")}</div>`;
+  $("det").innerHTML=h};
+$("b3").onclick=()=>{$("v3").hidden=true;$("v2").hidden=false};
+$("back").onclick=()=>{$("v2").hidden=true;$("v1").hidden=false};
+function rowsOut(){const o=[];out.forEach(p=>{if(p.err){o.push({file:p.race.file,status:"解析失敗",error:p.err});return}
+  const rk=new Map((p.rank||[]).map((x,i)=>[x.h.no,i+1]));
+  p.rows.forEach(x=>o.push({created_at:created,file:p.race.file,date:p.race.date,course:p.race.course,race_no:p.race.no,race_name:p.race.title,surface:p.race.type||"未取得",distance:p.race.dist||"未取得",
+   horse_no:x.h.no,horse:x.h.name,rank:rk.get(x.h.no)||"",A:x.s.A,B:x.s.B,C:x.s.C,total:x.s.T,notes:(p.race.shinba?["新馬戦・対象外"]:x.s.note).join("/"),runs:x.h.runs}))});return o}
+function dl(n,t,m){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([t],{type:m}));a.download=n;a.click()}
+$("json").onclick=()=>dl("keiba_v2_"+created.slice(0,10)+".json",JSON.stringify({created_at:created,results:rowsOut()},null,1),"application/json");
+$("csv").onclick=()=>{const r=rowsOut(),k=["created_at","file","date","course","race_no","race_name","surface","distance","horse_no","horse","rank","A","B","C","total","notes","runs","status","error"];
+  const q=v=>'"'+String(v==null?"":typeof v=="object"?JSON.stringify(v):v).replace(/"/g,'""')+'"';
+  dl("keiba_v2_"+created.slice(0,10)+".csv","\ufeff"+k.join(",")+"\n"+r.map(o=>k.map(c=>q(o[c])).join(",")).join("\n"),"text/csv")};
+</script></body></html>
